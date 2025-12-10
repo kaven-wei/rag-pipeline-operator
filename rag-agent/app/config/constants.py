@@ -1,0 +1,4 @@
+# Constants
+
+DEFAULT_TOP_K = 5
+DEFAULT_SCORE_THRESHOLD = 0.7
