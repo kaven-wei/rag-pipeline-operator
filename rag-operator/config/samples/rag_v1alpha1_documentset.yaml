@@ -1,0 +1,52 @@
+apiVersion: rag.ai/v1alpha1
+kind: DocumentSet
+metadata:
+  name: product-manuals
+  labels:
+    app.kubernetes.io/name: rag-operator
+spec:
+  source:
+    type: s3
+    uri: s3://docs-bucket/manuals/
+    secretRef:
+      name: s3-credentials
+  chunking:
+    size: 512
+    overlap: 100
+    format: markdown
+  embedding:
+    model: text-embedding-3-small
+    device: cpu
+    batchSize: 16
+    autoRetry: true
+  index:
+    vectorDB: qdrant
+    collection: manuals_v1
+    alias: manuals_prod
+    recreate: false
+---
+# Example with PVC source
+apiVersion: rag.ai/v1alpha1
+kind: DocumentSet
+metadata:
+  name: local-docs
+  labels:
+    app.kubernetes.io/name: rag-operator
+spec:
+  source:
+    type: pvc
+    uri: pvc://docs-pvc/documents/
+  chunking:
+    size: 1000
+    overlap: 200
+    format: text
+  embedding:
+    model: bge-large-en
+    device: gpu
+    batchSize: 32
+    autoRetry: true
+  index:
+    vectorDB: milvus
+    collection: local_docs
+    alias: docs_prod
+

@@ -19,6 +19,13 @@ CONTAINER_TOOL ?= docker
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
+# Colors for terminal output
+CYAN := \033[36m
+GREEN := \033[32m
+YELLOW := \033[33m
+RED := \033[31m
+RESET := \033[0m
+
 .PHONY: all
 all: build
 
@@ -41,21 +48,51 @@ help: ## Display this help.
 
 ##@ Development
 
+.PHONY: tidy
+tidy: ## Run go mod tidy to clean up dependencies.
+	@echo -e "$(CYAN)Running go mod tidy...$(RESET)"
+	go mod tidy
+	@echo -e "$(GREEN)✓ Dependencies tidied$(RESET)"
+
+.PHONY: verify-deps
+verify-deps: ## Verify that dependencies are correct.
+	@echo -e "$(CYAN)Verifying dependencies...$(RESET)"
+	go mod verify
+	@echo -e "$(GREEN)✓ Dependencies verified$(RESET)"
+
+.PHONY: download
+download: ## Download all dependencies.
+	@echo -e "$(CYAN)Downloading dependencies...$(RESET)"
+	go mod download
+	@echo -e "$(GREEN)✓ Dependencies downloaded$(RESET)"
+
+.PHONY: deps
+deps: tidy download verify-deps ## Full dependency management: tidy, download, and verify.
+
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
+	@echo -e "$(CYAN)Generating manifests...$(RESET)"
+	@mkdir -p config/crd/bases
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	@echo -e "$(GREEN)✓ Manifests generated$(RESET)"
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
+	@echo -e "$(CYAN)Generating code...$(RESET)"
 	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt" paths="./..."
+	@echo -e "$(GREEN)✓ Code generated$(RESET)"
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
+	@echo -e "$(CYAN)Running go fmt...$(RESET)"
 	go fmt ./...
+	@echo -e "$(GREEN)✓ Code formatted$(RESET)"
 
 .PHONY: vet
 vet: ## Run go vet against code.
+	@echo -e "$(CYAN)Running go vet...$(RESET)"
 	go vet ./...
+	@echo -e "$(GREEN)✓ Code vetted$(RESET)"
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
@@ -106,10 +143,22 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 
 .PHONY: build
 build: manifests generate fmt vet ## Build manager binary.
+	@echo -e "$(CYAN)Building manager binary...$(RESET)"
 	go build -o bin/manager cmd/main.go
+	@echo -e "$(GREEN)✓ Build complete: bin/manager$(RESET)"
+
+.PHONY: build-fast
+build-fast: ## Quick build without code generation (for development iteration).
+	@echo -e "$(CYAN)Quick building manager binary...$(RESET)"
+	go build -o bin/manager cmd/main.go
+	@echo -e "$(GREEN)✓ Quick build complete: bin/manager$(RESET)"
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
+	go run ./cmd/main.go
+
+.PHONY: run-fast
+run-fast: ## Quick run without code generation (for development iteration).
 	go run ./cmd/main.go
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
@@ -154,8 +203,10 @@ endif
 
 .PHONY: install
 install: manifests kustomize ## Install CRDs into the K8s cluster specified in ~/.kube/config.
+	@echo -e "$(CYAN)Installing CRDs...$(RESET)"
 	@out="$$( "$(KUSTOMIZE)" build config/crd 2>/dev/null || true )"; \
 	if [ -n "$$out" ]; then echo "$$out" | "$(KUBECTL)" apply -f -; else echo "No CRDs to install; skipping."; fi
+	@echo -e "$(GREEN)✓ CRDs installed$(RESET)"
 
 .PHONY: uninstall
 uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
@@ -170,6 +221,105 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
+
+##@ Cleanup & Cache
+
+.PHONY: clean
+clean: ## Remove build artifacts and generated files.
+	@echo -e "$(CYAN)Cleaning build artifacts...$(RESET)"
+	rm -rf bin/
+	rm -rf cover.out
+	rm -rf dist/
+	rm -f Dockerfile.cross
+	@echo -e "$(GREEN)✓ Build artifacts cleaned$(RESET)"
+
+.PHONY: clean-tools
+clean-tools: ## Remove downloaded tool binaries.
+	@echo -e "$(CYAN)Cleaning tool binaries...$(RESET)"
+	rm -rf $(LOCALBIN)
+	@echo -e "$(GREEN)✓ Tool binaries cleaned$(RESET)"
+
+.PHONY: clean-generated
+clean-generated: ## Remove generated code (DeepCopy, CRDs, etc.).
+	@echo -e "$(YELLOW)Warning: This will remove generated files!$(RESET)"
+	rm -f api/v1alpha1/zz_generated.deepcopy.go
+	rm -rf config/crd/bases/
+	@echo -e "$(GREEN)✓ Generated files cleaned$(RESET)"
+
+.PHONY: clean-all
+clean-all: clean clean-tools clean-generated ## Remove all generated files, tools, and build artifacts.
+	@echo -e "$(GREEN)✓ All cleaned$(RESET)"
+
+.PHONY: clean-cache
+clean-cache: ## Clean Go module cache (use with caution).
+	@echo -e "$(YELLOW)Cleaning Go module cache...$(RESET)"
+	go clean -modcache
+	@echo -e "$(GREEN)✓ Module cache cleaned$(RESET)"
+
+##@ Development Utilities
+
+.PHONY: dev-setup
+dev-setup: deps controller-gen kustomize ## Set up development environment (download deps and tools).
+	@echo -e "$(GREEN)✓ Development environment ready$(RESET)"
+
+.PHONY: dev-refresh
+dev-refresh: tidy generate manifests fmt vet ## Refresh all generated code and manifests.
+	@echo -e "$(GREEN)✓ All code and manifests refreshed$(RESET)"
+
+.PHONY: pre-commit
+pre-commit: tidy fmt vet lint ## Run all checks before committing.
+	@echo -e "$(GREEN)✓ Pre-commit checks passed$(RESET)"
+
+.PHONY: check
+check: verify-deps vet lint test ## Run all verification and tests.
+	@echo -e "$(GREEN)✓ All checks passed$(RESET)"
+
+.PHONY: quick-test
+quick-test: ## Run tests without regenerating code (faster for TDD).
+	go test $$(go list ./... | grep -v /e2e) -v
+
+.PHONY: show-coverage
+show-coverage: test ## Run tests and display coverage report.
+	go tool cover -html=cover.out
+
+.PHONY: watch
+watch: ## Watch for file changes and rebuild (requires entr).
+	@command -v entr >/dev/null 2>&1 || { echo "entr is required. Install with: brew install entr (macOS) or apt install entr (Linux)"; exit 1; }
+	@echo -e "$(CYAN)Watching for changes...$(RESET)"
+	find . -name '*.go' | entr -r make build-fast
+
+.PHONY: apply-samples
+apply-samples: ## Apply sample CRs to the cluster.
+	@echo -e "$(CYAN)Applying sample CRs...$(RESET)"
+	"$(KUBECTL)" apply -f config/samples/
+	@echo -e "$(GREEN)✓ Samples applied$(RESET)"
+
+.PHONY: delete-samples
+delete-samples: ## Delete sample CRs from the cluster.
+	@echo -e "$(CYAN)Deleting sample CRs...$(RESET)"
+	"$(KUBECTL)" delete -f config/samples/ --ignore-not-found=true
+	@echo -e "$(GREEN)✓ Samples deleted$(RESET)"
+
+.PHONY: logs
+logs: ## Tail controller manager logs.
+	"$(KUBECTL)" logs -f -n rag-operator-system deployment/rag-operator-controller-manager -c manager
+
+.PHONY: describe
+describe: ## Describe all RAG CRDs in the cluster.
+	@echo -e "$(CYAN)=== DocumentSets ===$(RESET)"
+	"$(KUBECTL)" get documentsets -A
+	@echo -e "$(CYAN)=== EmbeddingJobs ===$(RESET)"
+	"$(KUBECTL)" get embeddingjobs -A
+	@echo -e "$(CYAN)=== IndexJobs ===$(RESET)"
+	"$(KUBECTL)" get indexjobs -A
+
+.PHONY: version
+version: ## Display version information.
+	@echo -e "$(CYAN)RAG Pipeline Operator$(RESET)"
+	@echo "Go version: $$(go version | cut -d' ' -f3)"
+	@echo "Controller-gen: $(CONTROLLER_TOOLS_VERSION)"
+	@echo "Kustomize: $(KUSTOMIZE_VERSION)"
+	@echo "Image: $(IMG)"
 
 ##@ Dependencies
 

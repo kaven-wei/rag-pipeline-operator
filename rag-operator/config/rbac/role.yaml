@@ -6,6 +6,57 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: manager-role
 rules:
+# Core API resources
 - apiGroups: [""]
   resources: ["pods"]
   verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+
+# Batch API for Jobs
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+# RAG CRDs - DocumentSet
+- apiGroups: ["rag.ai"]
+  resources: ["documentsets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["rag.ai"]
+  resources: ["documentsets/status"]
+  verbs: ["get", "update", "patch"]
+- apiGroups: ["rag.ai"]
+  resources: ["documentsets/finalizers"]
+  verbs: ["update"]
+
+# RAG CRDs - EmbeddingJob
+- apiGroups: ["rag.ai"]
+  resources: ["embeddingjobs"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["rag.ai"]
+  resources: ["embeddingjobs/status"]
+  verbs: ["get", "update", "patch"]
+- apiGroups: ["rag.ai"]
+  resources: ["embeddingjobs/finalizers"]
+  verbs: ["update"]
+
+# RAG CRDs - IndexJob
+- apiGroups: ["rag.ai"]
+  resources: ["indexjobs"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["rag.ai"]
+  resources: ["indexjobs/status"]
+  verbs: ["get", "update", "patch"]
+- apiGroups: ["rag.ai"]
+  resources: ["indexjobs/finalizers"]
+  verbs: ["update"]

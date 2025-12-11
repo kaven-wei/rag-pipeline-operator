@@ -1,0 +1,19 @@
+apiVersion: rag.ai/v1alpha1
+kind: EmbeddingJob
+metadata:
+  name: manual-embedding-job
+  labels:
+    app.kubernetes.io/name: rag-operator
+spec:
+  documentSet: product-manuals
+  embeddingModel: text-embedding-3-small
+  vectorDB:
+    type: qdrant
+    collection: manuals_v1_20241210
+    endpoint: http://qdrant.default.svc:6333
+    secretRef:
+      name: qdrant-credentials
+  retryPolicy:
+    maxRetries: 3
+    backoffSeconds: 30
+

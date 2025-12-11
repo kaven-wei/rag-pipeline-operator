@@ -1,0 +1,24 @@
+apiVersion: rag.ai/v1alpha1
+kind: IndexJob
+metadata:
+  name: hnsw-index-job
+  labels:
+    app.kubernetes.io/name: rag-operator
+spec:
+  documentSet: product-manuals
+  vectorDB:
+    type: qdrant
+    collection: manuals_v1_20241210
+    endpoint: http://qdrant.default.svc:6333
+    secretRef:
+      name: qdrant-credentials
+  targetAlias: manuals_prod
+  indexSpec:
+    type: HNSW
+    parameters:
+      efConstruction: "200"
+      M: "16"
+  retryPolicy:
+    maxRetries: 3
+    backoffSeconds: 30
+
