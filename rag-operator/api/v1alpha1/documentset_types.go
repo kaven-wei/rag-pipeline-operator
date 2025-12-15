@@ -34,6 +34,17 @@ const (
 	ConditionTypeChunkingCompleted  = "ChunkingCompleted"
 	ConditionTypeEmbeddingCompleted = "EmbeddingCompleted"
 	ConditionTypeIndexingCompleted  = "IndexingCompleted"
+	ConditionTypeSourceChanged      = "SourceChanged"
+	ConditionTypeSyncInProgress     = "SyncInProgress"
+)
+
+// SyncState constants
+const (
+	SyncStateIdle      = "Idle"
+	SyncStateChecking  = "Checking"
+	SyncStateSyncing   = "Syncing"
+	SyncStateCompleted = "Completed"
+	SyncStateFailed    = "Failed"
 )
 
 // Source types
@@ -49,6 +60,20 @@ const (
 	VectorDBMilvus   = "milvus"
 	VectorDBQdrant   = "qdrant"
 	VectorDBWeaviate = "weaviate"
+)
+
+// Sync mode types
+const (
+	SyncModeManual = "manual"
+	SyncModeAuto   = "auto"
+)
+
+// Sync trigger types
+const (
+	SyncTriggerContentHash  = "contentHash"  // Check content hash for changes
+	SyncTriggerModifiedTime = "modifiedTime" // Check file modified time
+	SyncTriggerGitCommit    = "gitCommit"    // Check git commit hash (for git sources)
+	SyncTriggerS3ETag       = "s3ETag"       // Check S3 ETag (for s3 sources)
 )
 
 // DocumentSetSpec defines the desired state of DocumentSet
@@ -68,6 +93,49 @@ type DocumentSetSpec struct {
 	// Index defines the vector database and collection settings
 	// +kubebuilder:validation:Required
 	Index IndexSpec `json:"index"`
+
+	// SyncPolicy defines how to detect and sync document changes
+	// +optional
+	SyncPolicy *SyncPolicySpec `json:"syncPolicy,omitempty"`
+}
+
+// SyncPolicySpec defines the synchronization strategy for document sources
+type SyncPolicySpec struct {
+	// Mode defines the sync mode: manual or auto
+	// - manual: only sync when DocumentSet spec changes or manually triggered
+	// - auto: automatically detect source changes and sync
+	// +kubebuilder:validation:Enum=manual;auto
+	// +kubebuilder:default=manual
+	// +optional
+	Mode string `json:"mode,omitempty"`
+
+	// Interval defines how often to check for source changes (e.g., "1m", "5m", "1h")
+	// Only applies when Mode is "auto"
+	// +kubebuilder:default="5m"
+	// +optional
+	Interval string `json:"interval,omitempty"`
+
+	// TriggerOn defines what triggers a sync
+	// +kubebuilder:validation:Enum=contentHash;modifiedTime;gitCommit;s3ETag
+	// +kubebuilder:default=contentHash
+	// +optional
+	TriggerOn string `json:"triggerOn,omitempty"`
+
+	// IncrementalSync enables processing only changed documents instead of full re-sync
+	// +kubebuilder:default=false
+	// +optional
+	IncrementalSync bool `json:"incrementalSync,omitempty"`
+
+	// MaxConcurrentSyncs limits concurrent sync operations for this DocumentSet
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=1
+	// +optional
+	MaxConcurrentSyncs int `json:"maxConcurrentSyncs,omitempty"`
+
+	// PauseSync temporarily pauses automatic syncing when set to true
+	// +kubebuilder:default=false
+	// +optional
+	PauseSync bool `json:"pauseSync,omitempty"`
 }
 
 type SourceSpec struct {
@@ -196,6 +264,99 @@ type DocumentSetStatus struct {
 	// ObservedGeneration is the last generation observed by the controller
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// ---- Auto-Sync Related Fields ----
+
+	// SyncStatus tracks the current sync operation status
+	// +optional
+	SyncStatus *SyncStatus `json:"syncStatus,omitempty"`
+
+	// LastSourceHash is the hash of the source content from the last successful sync
+	// +optional
+	LastSourceHash string `json:"lastSourceHash,omitempty"`
+
+	// LastSourceCheckTime is when the source was last checked for changes
+	// +optional
+	LastSourceCheckTime *metav1.Time `json:"lastSourceCheckTime,omitempty"`
+
+	// LastSuccessfulSyncTime is when the last successful sync completed
+	// +optional
+	LastSuccessfulSyncTime *metav1.Time `json:"lastSuccessfulSyncTime,omitempty"`
+
+	// SyncCount is the total number of sync operations performed
+	// +optional
+	SyncCount int `json:"syncCount,omitempty"`
+
+	// SourceMetadata stores source-specific metadata for change detection
+	// +optional
+	SourceMetadata *SourceMetadata `json:"sourceMetadata,omitempty"`
+}
+
+// SyncStatus represents the status of current or last sync operation
+type SyncStatus struct {
+	// State of the sync: Idle, Checking, Syncing, Completed, Failed
+	// +kubebuilder:validation:Enum=Idle;Checking;Syncing;Completed;Failed
+	// +optional
+	State string `json:"state,omitempty"`
+
+	// StartedAt is when the current sync started
+	// +optional
+	StartedAt *metav1.Time `json:"startedAt,omitempty"`
+
+	// CompletedAt is when the current sync completed
+	// +optional
+	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
+
+	// ChangesDetected indicates if changes were found during check
+	// +optional
+	ChangesDetected bool `json:"changesDetected,omitempty"`
+
+	// FilesChanged is the number of files that changed
+	// +optional
+	FilesChanged int `json:"filesChanged,omitempty"`
+
+	// FilesAdded is the number of new files added
+	// +optional
+	FilesAdded int `json:"filesAdded,omitempty"`
+
+	// FilesDeleted is the number of files removed
+	// +optional
+	FilesDeleted int `json:"filesDeleted,omitempty"`
+
+	// ErrorMessage contains error details if sync failed
+	// +optional
+	ErrorMessage string `json:"errorMessage,omitempty"`
+}
+
+// SourceMetadata stores source-specific metadata for change detection
+type SourceMetadata struct {
+	// S3ETag for S3 sources
+	// +optional
+	S3ETag string `json:"s3ETag,omitempty"`
+
+	// GitCommitHash for Git sources
+	// +optional
+	GitCommitHash string `json:"gitCommitHash,omitempty"`
+
+	// GitBranch for Git sources
+	// +optional
+	GitBranch string `json:"gitBranch,omitempty"`
+
+	// LastModifiedTime for filesystem/PVC sources
+	// +optional
+	LastModifiedTime *metav1.Time `json:"lastModifiedTime,omitempty"`
+
+	// FileCount is the number of files in the source
+	// +optional
+	FileCount int `json:"fileCount,omitempty"`
+
+	// TotalSize is the total size of source files in bytes
+	// +optional
+	TotalSize int64 `json:"totalSize,omitempty"`
+
+	// FileHashes stores individual file hashes for incremental sync
+	// +optional
+	FileHashes map[string]string `json:"fileHashes,omitempty"`
 }
 
 // +kubebuilder:object:root=true

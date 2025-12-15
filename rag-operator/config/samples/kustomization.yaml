@@ -1,6 +1,7 @@
 ## Append samples of your project ##
 resources:
 - rag_v1alpha1_documentset.yaml
+- rag_v1alpha1_documentset_autosync.yaml  # Auto-sync examples
 - rag_v1alpha1_embeddingjob.yaml
 - rag_v1alpha1_indexjob.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

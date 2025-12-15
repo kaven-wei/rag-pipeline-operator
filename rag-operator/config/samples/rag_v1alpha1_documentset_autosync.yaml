@@ -1,0 +1,192 @@
+# Example: DocumentSet with Auto-Sync enabled
+# This example demonstrates automatic knowledge base synchronization
+# when document sources change - achieving minute-level sync latency.
+
+---
+# Example 1: S3 Source with Auto-Sync (1-minute interval)
+apiVersion: rag.ai/v1alpha1
+kind: DocumentSet
+metadata:
+  name: product-docs-autosync
+  labels:
+    app.kubernetes.io/name: rag-operator
+    rag.ai/autosync: "true"
+spec:
+  source:
+    type: s3
+    uri: s3://company-docs/product-manuals/
+    secretRef:
+      name: s3-credentials
+  
+  chunking:
+    size: 512
+    overlap: 100
+    format: markdown
+  
+  embedding:
+    model: text-embedding-3-small
+    device: cpu
+    batchSize: 16
+    autoRetry: true
+  
+  index:
+    vectorDB: qdrant
+    collection: product_docs_v1
+    alias: product_docs_prod
+    recreate: false
+  
+  # Auto-sync configuration
+  syncPolicy:
+    # Enable automatic sync mode
+    mode: auto
+    # Check for changes every 1 minute
+    interval: "1m"
+    # Trigger sync based on content hash changes
+    triggerOn: contentHash
+    # Enable incremental sync for efficiency
+    incrementalSync: true
+    # Allow only 1 concurrent sync operation
+    maxConcurrentSyncs: 1
+    # Set to true to temporarily pause syncing
+    pauseSync: false
+
+---
+# Example 2: Git Repository with Auto-Sync (5-minute interval)
+apiVersion: rag.ai/v1alpha1
+kind: DocumentSet
+metadata:
+  name: engineering-wiki-autosync
+  labels:
+    app.kubernetes.io/name: rag-operator
+spec:
+  source:
+    type: git
+    # Git URI format: git://repo-url#branch
+    uri: "https://github.com/company/engineering-wiki.git#main"
+    secretRef:
+      name: github-token
+  
+  chunking:
+    size: 1000
+    overlap: 200
+    format: markdown
+  
+  embedding:
+    model: bge-large-en
+    device: gpu
+    batchSize: 32
+    autoRetry: true
+  
+  index:
+    vectorDB: qdrant
+    collection: wiki_docs
+    alias: wiki_prod
+  
+  syncPolicy:
+    mode: auto
+    interval: "5m"
+    # For Git, use gitCommit trigger to detect new commits
+    triggerOn: gitCommit
+    incrementalSync: true
+
+---
+# Example 3: PVC Source with Auto-Sync (2-minute interval)
+apiVersion: rag.ai/v1alpha1
+kind: DocumentSet
+metadata:
+  name: local-files-autosync
+spec:
+  source:
+    type: pvc
+    uri: pvc://shared-docs-pvc/knowledge-base/
+  
+  chunking:
+    size: 800
+    overlap: 150
+    format: text
+  
+  embedding:
+    model: text-embedding-ada-002
+    device: cpu
+    batchSize: 24
+  
+  index:
+    vectorDB: qdrant
+    collection: local_knowledge
+    alias: knowledge_prod
+  
+  syncPolicy:
+    mode: auto
+    interval: "2m"
+    # For PVC/filesystem, use modifiedTime to detect file changes
+    triggerOn: modifiedTime
+    incrementalSync: true
+
+---
+# Example 4: HTTP Source with Auto-Sync
+apiVersion: rag.ai/v1alpha1
+kind: DocumentSet
+metadata:
+  name: api-docs-autosync
+spec:
+  source:
+    type: http
+    uri: "https://api.example.com/docs/openapi.yaml"
+    secretRef:
+      name: api-auth-token
+  
+  chunking:
+    size: 600
+    overlap: 100
+    format: text
+  
+  embedding:
+    model: text-embedding-3-small
+    device: cpu
+    batchSize: 16
+  
+  index:
+    vectorDB: qdrant
+    collection: api_docs
+    alias: api_docs_prod
+  
+  syncPolicy:
+    mode: auto
+    interval: "10m"
+    # For HTTP, use s3ETag (which stores HTTP ETag/Last-Modified)
+    triggerOn: s3ETag
+    incrementalSync: false  # HTTP sources typically need full re-sync
+
+---
+# Supporting Secret for S3 access
+apiVersion: v1
+kind: Secret
+metadata:
+  name: s3-credentials
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: "your-access-key"
+  AWS_SECRET_ACCESS_KEY: "your-secret-key"
+  AWS_REGION: "us-west-2"
+
+---
+# Supporting Secret for GitHub access
+apiVersion: v1
+kind: Secret
+metadata:
+  name: github-token
+type: Opaque
+stringData:
+  GIT_TOKEN: "ghp_your_github_token"
+  GIT_USERNAME: "your-username"
+
+---
+# Supporting Secret for HTTP API access
+apiVersion: v1
+kind: Secret
+metadata:
+  name: api-auth-token
+type: Opaque
+stringData:
+  HTTP_AUTH_TOKEN: "your-api-token"
+

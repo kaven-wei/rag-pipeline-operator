@@ -37,12 +37,15 @@ import (
 const (
 	documentSetFinalizer = "documentset.rag.ai/finalizer"
 	requeueAfter         = 30 * time.Second
+	defaultSyncInterval  = 5 * time.Minute
+	minSyncInterval      = 1 * time.Minute
 )
 
 // DocumentSetReconciler reconciles a DocumentSet object
 type DocumentSetReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme        *runtime.Scheme
+	SourceWatcher *SourceWatcher
 }
 
 // +kubebuilder:rbac:groups=rag.ai,resources=documentsets,verbs=get;list;watch;create;update;patch;delete
@@ -369,6 +372,23 @@ func (r *DocumentSetReconciler) updateStatusReady(ctx context.Context, ds *ragv1
 	ds.Status.LastUpdateTime = &now
 	ds.Status.ObservedGeneration = ds.Generation
 
+	// Update sync status for successful completion
+	if ds.Status.SyncStatus != nil && ds.Status.SyncStatus.State == ragv1alpha1.SyncStateSyncing {
+		ds.Status.SyncStatus.State = ragv1alpha1.SyncStateCompleted
+		ds.Status.SyncStatus.CompletedAt = &now
+		ds.Status.SyncStatus.ErrorMessage = ""
+	}
+	ds.Status.LastSuccessfulSyncTime = &now
+
+	// Clear source changed condition
+	meta.SetStatusCondition(&ds.Status.Conditions, metav1.Condition{
+		Type:               ragv1alpha1.ConditionTypeSourceChanged,
+		Status:             metav1.ConditionFalse,
+		Reason:             "SyncCompleted",
+		Message:            "Source changes have been synchronized",
+		LastTransitionTime: now,
+	})
+
 	meta.SetStatusCondition(&ds.Status.Conditions, metav1.Condition{
 		Type:               ragv1alpha1.ConditionTypeIndexingCompleted,
 		Status:             metav1.ConditionTrue,
@@ -381,10 +401,16 @@ func (r *DocumentSetReconciler) updateStatusReady(ctx context.Context, ds *ragv1
 		return ctrl.Result{}, err
 	}
 
+	// If auto-sync is enabled, schedule next check
+	if ds.Spec.SyncPolicy != nil && ds.Spec.SyncPolicy.Mode == ragv1alpha1.SyncModeAuto {
+		return ctrl.Result{RequeueAfter: getSyncInterval(ds)}, nil
+	}
+
 	return ctrl.Result{}, nil
 }
 
 // handleReadyPhase checks if spec has changed and needs reprocessing
+// Also handles automatic sync when SyncPolicy is configured
 func (r *DocumentSetReconciler) handleReadyPhase(ctx context.Context, ds *ragv1alpha1.DocumentSet) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -394,8 +420,159 @@ func (r *DocumentSetReconciler) handleReadyPhase(ctx context.Context, ds *ragv1a
 		return r.initializeStatus(ctx, ds)
 	}
 
+	// Check if auto-sync is enabled
+	if ds.Spec.SyncPolicy != nil && ds.Spec.SyncPolicy.Mode == ragv1alpha1.SyncModeAuto {
+		return r.handleAutoSync(ctx, ds)
+	}
+
 	// No changes, stay in Ready state
 	return ctrl.Result{}, nil
+}
+
+// handleAutoSync handles automatic source change detection and sync
+func (r *DocumentSetReconciler) handleAutoSync(ctx context.Context, ds *ragv1alpha1.DocumentSet) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// Check if sync is paused
+	if ds.Spec.SyncPolicy.PauseSync {
+		logger.V(1).Info("Auto-sync is paused")
+		return ctrl.Result{RequeueAfter: getSyncInterval(ds)}, nil
+	}
+
+	// Initialize SourceWatcher if not set
+	if r.SourceWatcher == nil {
+		r.SourceWatcher = &SourceWatcher{
+			Client: r.Client,
+			Log:    logger,
+		}
+	}
+
+	// Check if we should run a sync check
+	shouldSync, reason := r.SourceWatcher.ShouldSync(ds)
+	if !shouldSync {
+		logger.V(1).Info("Skipping sync check", "reason", reason)
+		return ctrl.Result{RequeueAfter: getSyncInterval(ds)}, nil
+	}
+
+	logger.Info("Running auto-sync check")
+
+	// Update sync status to Checking
+	now := metav1.Now()
+	if ds.Status.SyncStatus == nil {
+		ds.Status.SyncStatus = &ragv1alpha1.SyncStatus{}
+	}
+	ds.Status.SyncStatus.State = ragv1alpha1.SyncStateChecking
+	ds.Status.SyncStatus.StartedAt = &now
+	ds.Status.LastSourceCheckTime = &now
+
+	if err := r.Status().Update(ctx, ds); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Check for source changes
+	result, err := r.SourceWatcher.CheckSourceChanges(ctx, ds)
+	if err != nil {
+		logger.Error(err, "Failed to check source changes")
+		ds.Status.SyncStatus.State = ragv1alpha1.SyncStateFailed
+		ds.Status.SyncStatus.ErrorMessage = err.Error()
+
+		if updateErr := r.Status().Update(ctx, ds); updateErr != nil {
+			return ctrl.Result{}, updateErr
+		}
+
+		// Retry after interval
+		return ctrl.Result{RequeueAfter: getSyncInterval(ds)}, nil
+	}
+
+	// Update source metadata
+	ds.Status.SourceMetadata = result.NewMetadata
+
+	if !result.Changed {
+		logger.V(1).Info("No source changes detected")
+		ds.Status.SyncStatus.State = ragv1alpha1.SyncStateIdle
+		ds.Status.SyncStatus.ChangesDetected = false
+
+		if err := r.Status().Update(ctx, ds); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{RequeueAfter: getSyncInterval(ds)}, nil
+	}
+
+	// Source changed - trigger re-sync
+	logger.Info("Source changes detected, triggering sync",
+		"filesAdded", result.FilesAdded,
+		"filesDeleted", result.FilesDeleted,
+		"filesChanged", result.FilesChanged,
+	)
+
+	// Update sync status
+	ds.Status.SyncStatus.State = ragv1alpha1.SyncStateSyncing
+	ds.Status.SyncStatus.ChangesDetected = true
+	ds.Status.SyncStatus.FilesAdded = result.FilesAdded
+	ds.Status.SyncStatus.FilesDeleted = result.FilesDeleted
+	ds.Status.SyncStatus.FilesChanged = result.FilesChanged
+
+	// Add condition for source change
+	meta.SetStatusCondition(&ds.Status.Conditions, metav1.Condition{
+		Type:               ragv1alpha1.ConditionTypeSourceChanged,
+		Status:             metav1.ConditionTrue,
+		Reason:             "SourceContentChanged",
+		Message:            fmt.Sprintf("Source content changed: %d added, %d deleted, %d modified", result.FilesAdded, result.FilesDeleted, result.FilesChanged),
+		LastTransitionTime: now,
+	})
+
+	if err := r.Status().Update(ctx, ds); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Trigger re-processing by resetting to Pending phase
+	return r.triggerSync(ctx, ds, result)
+}
+
+// triggerSync initiates a new sync operation
+func (r *DocumentSetReconciler) triggerSync(ctx context.Context, ds *ragv1alpha1.DocumentSet, changeResult *SourceChangeResult) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	logger.Info("Triggering sync operation")
+
+	now := metav1.Now()
+
+	// Store the new source hash (will be confirmed after successful sync)
+	ds.Status.LastSourceHash = changeResult.NewHash
+	ds.Status.SyncCount++
+
+	// Reset to Pending to start the pipeline
+	ds.Status.Phase = ragv1alpha1.DocumentSetPhasePending
+	ds.Status.Message = fmt.Sprintf("Auto-sync triggered: %d files changed",
+		changeResult.FilesAdded+changeResult.FilesDeleted+changeResult.FilesChanged)
+	ds.Status.LastUpdateTime = &now
+
+	// Keep observed generation to avoid double-triggering
+	ds.Status.ObservedGeneration = ds.Generation
+
+	if err := r.Status().Update(ctx, ds); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{Requeue: true}, nil
+}
+
+// getSyncInterval returns the sync interval for the DocumentSet
+func getSyncInterval(ds *ragv1alpha1.DocumentSet) time.Duration {
+	if ds.Spec.SyncPolicy == nil || ds.Spec.SyncPolicy.Interval == "" {
+		return defaultSyncInterval
+	}
+
+	interval, err := time.ParseDuration(ds.Spec.SyncPolicy.Interval)
+	if err != nil {
+		return defaultSyncInterval
+	}
+
+	if interval < minSyncInterval {
+		return minSyncInterval
+	}
+
+	return interval
 }
 
 // handleFailedPhase handles retry logic for failed DocumentSets
